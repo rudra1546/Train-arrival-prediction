@@ -1,116 +1,154 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
-import { TrainSearch } from './components/TrainSearch';
-import { TrainSummary } from './components/TrainSummary';
-import { CurrentStationCard } from './components/CurrentStationCard';
-import { PredictionList } from './components/PredictionList';
-import { PredictionExplanation } from './components/PredictionExplanation';
-import { EmptyState } from './components/EmptyState';
-import { ErrorState } from './components/ErrorState';
-import { LoadingSkeleton } from './components/LoadingSkeleton';
-import { fetchTrainETA } from './services/api';
-import type { TrainETAResponse, APIErrorState } from './types/eta';
+import { RouteSearchPage } from './components/RouteSearchPage';
+import { LiveTrackingPage } from './components/LiveTrackingPage';
+import { ETAPredictionPage } from './components/ETAPredictionPage';
+import { DashboardOverview } from './components/DashboardOverview';
+import { checkBackendHealth } from './services/api';
+import {
+  getLastSearchedTrain,
+  saveLastSearchedTrain,
+  clearLastSearchedTrain,
+  type LastSearchedTrain
+} from './services/persistence';
 
 export const App: React.FC = () => {
-  const [currentTrain, setCurrentTrain] = useState<string>('');
-  const [trainData, setTrainData] = useState<TrainETAResponse | null>(null);
+  const [activeTab, setActiveTab] = useState<string>('dashboard');
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState<boolean>(false);
+  const [isBackendConnected, setIsBackendConnected] = useState<boolean | null>(null);
+
+  // Load last searched train from browser localStorage (dynamic_eta_last_train)
+  const [savedTrain, setSavedTrain] = useState<LastSearchedTrain | null>(() => getLastSearchedTrain());
+  const [refreshCounter, setRefreshCounter] = useState<number>(0);
   const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [error, setError] = useState<APIErrorState | null>(null);
-  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
-  const loadTrainETA = async (trainNo: string) => {
-    setIsLoading(true);
-    setError(null);
-    setCurrentTrain(trainNo);
+  // Check API connectivity on load
+  const verifyConnectivity = useCallback(async () => {
+    const isHealthy = await checkBackendHealth();
+    setIsBackendConnected(isHealthy);
+  }, []);
 
-    try {
-      const data = await fetchTrainETA(trainNo);
-      setTrainData(data);
-      setLastUpdated(new Date());
-    } catch (err: any) {
-      setTrainData(null);
-      setError(err as APIErrorState);
-    } finally {
-      setIsLoading(false);
-    }
+  useEffect(() => {
+    verifyConnectivity();
+  }, [verifyConnectivity]);
+
+  const handleRefresh = async () => {
+    verifyConnectivity();
+    setRefreshCounter((prev) => prev + 1);
   };
 
-  const handleRefresh = () => {
-    if (currentTrain) {
-      loadTrainETA(currentTrain);
-    }
+  const handleClearSelectedTrain = () => {
+    clearLastSearchedTrain();
+    setSavedTrain(null);
   };
 
-  const formatLastUpdated = (date: Date): string => {
-    const diffSec = Math.floor((Date.now() - date.getTime()) / 1000);
-    if (diffSec < 20) {
-      return 'Updated just now';
+  const handleSelectTrainFromSearch = (selected: LastSearchedTrain) => {
+    saveLastSearchedTrain(selected);
+    setSavedTrain(selected);
+    setActiveTab('dashboard');
+  };
+
+  const handleViewLiveTracking = () => {
+    setActiveTab('tracking');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleViewETAPrediction = () => {
+    setActiveTab('prediction');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleSelectNavTab = (tabId: string) => {
+    setActiveTab(tabId);
+    setIsMobileSidebarOpen(false);
+
+    if (tabId === 'dashboard' || tabId === 'search' || tabId === 'tracking' || tabId === 'prediction') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } else if (tabId === 'analytics') {
+      setActiveTab('dashboard');
+      setTimeout(() => {
+        const mlEl =
+          document.getElementById('ml-model-info-section') ||
+          document.querySelector('.ml-model-info-section');
+        if (mlEl) {
+          mlEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      }, 50);
     }
-    return `Updated ${date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true })}`;
   };
 
   return (
-    <div className="app-container">
-      {/* 1. Header */}
-      <Header />
-
-      {/* 2. Train Search */}
-      <TrainSearch
-        onSearch={loadTrainETA}
-        isLoading={isLoading}
-        initialValue={currentTrain}
+    <div className="platform-layout">
+      {/* 1. Left Sidebar (Fixed desktop + Mobile slide-out drawer) */}
+      <Sidebar
+        activeTab={activeTab}
+        onSelectTab={handleSelectNavTab}
+        isOpen={isMobileSidebarOpen}
+        onClose={() => setIsMobileSidebarOpen(false)}
       />
 
-      {/* 3. Loading State */}
-      {isLoading && <LoadingSkeleton />}
-
-      {/* 4. Error State */}
-      {!isLoading && error && (
-        <ErrorState
-          error={error}
-          onRetry={currentTrain ? () => loadTrainETA(currentTrain) : undefined}
+      {/* Main Viewport Container */}
+      <div className="platform-main-container">
+        {/* 2. Top Header */}
+        <Header
+          onRefresh={handleRefresh}
+          isLoading={isLoading}
+          hasActiveTrain={Boolean(savedTrain?.train_no)}
+          isBackendConnected={isBackendConnected}
+          onToggleMobileMenu={() => setIsMobileSidebarOpen((prev) => !prev)}
         />
-      )}
 
-      {/* 5. Successful Data Display */}
-      {!isLoading && !error && trainData && (
-        <>
-          <TrainSummary
-            trainNo={trainData.train_no}
-            trainName={trainData.train_name}
-            status={trainData.status}
-            journeyDate={trainData.journey_date}
-            lastUpdatedText={lastUpdated ? formatLastUpdated(lastUpdated) : undefined}
-            onRefresh={handleRefresh}
-            isLoading={isLoading}
-          />
+        {/* 3. Main Content: Route Search Page OR Live Tracking OR ETA Prediction OR Dashboard Overview */}
+        {activeTab === 'search' ? (
+          <main className="dashboard-content-area search-page-view">
+            <RouteSearchPage
+              onSelectTrain={handleSelectTrainFromSearch}
+              lastSearchedTrain={savedTrain?.train_no || ''}
+            />
+          </main>
+        ) : activeTab === 'tracking' ? (
+          <main className="dashboard-content-area live-tracking-page-view">
+            <LiveTrackingPage
+              savedTrain={savedTrain}
+              onNavigateToSearch={() => setActiveTab('search')}
+              onNavigateToPrediction={handleViewETAPrediction}
+            />
+          </main>
+        ) : activeTab === 'prediction' ? (
+          <main className="dashboard-content-area eta-prediction-page-view">
+            <ETAPredictionPage
+              savedTrain={savedTrain}
+              onNavigateToSearch={() => setActiveTab('search')}
+              onNavigateToTracking={handleViewLiveTracking}
+            />
+          </main>
+        ) : (
+          <main className="dashboard-content-area dashboard-page-view">
+            <DashboardOverview
+              savedTrain={savedTrain}
+              onNavigateToSearch={() => setActiveTab('search')}
+              onNavigateToTracking={handleViewLiveTracking}
+              onNavigateToPrediction={handleViewETAPrediction}
+              onClearTrain={handleClearSelectedTrain}
+              refreshTrigger={refreshCounter}
+              onLoadingChange={setIsLoading}
+            />
+          </main>
+        )}
 
-          <CurrentStationCard currentStation={trainData.current_station} />
-
-          <PredictionList predictions={trainData.predictions} />
-
-          <PredictionExplanation />
-        </>
-      )}
-
-      {/* 6. Empty State */}
-      {!isLoading && !error && !trainData && (
-        <EmptyState onSelectTrain={loadTrainETA} />
-      )}
-
-      {/* 7. Footer / Metadata */}
-      <footer className="app-footer">
-        <div>
-          {lastUpdated ? (
-            <span>Last fetched: <strong>{formatLastUpdated(lastUpdated)}</strong></span>
-          ) : (
-            <span>Ready for query</span>
-          )}
-        </div>
-        <div className="footer-model-info">
-          <span>Multi-Horizon Inference Engine: <strong>XGBoost H1/H2/H3</strong></span>
-        </div>
-      </footer>
+        {/* Platform Footer */}
+        <footer className="platform-footer">
+          <div className="footer-left">
+            <span>Dynamic Train ETA Platform • SIH 26028 Real-Time Operational Infrastructure</span>
+          </div>
+          <div className="footer-right">
+            <span>Inference: <strong>XGBoost Regressors (H1, H2, H3)</strong></span>
+            <span className="footer-sep">•</span>
+            <span>Upstream: <strong>RailRadar Telemetry</strong></span>
+          </div>
+        </footer>
+      </div>
     </div>
   );
 };

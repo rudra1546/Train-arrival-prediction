@@ -1,4 +1,6 @@
+import React from 'react';
 import type { HorizonPrediction } from '../types/eta';
+import { Clock, Calendar, Navigation, ArrowUpRight } from 'lucide-react';
 
 interface PredictionCardProps {
   prediction: HorizonPrediction;
@@ -12,12 +14,10 @@ function formatTimeString(isoStr: string): string {
       return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
     }
   } catch {
-    // ignore
+    // fallback
   }
-  // Fallback to substring
   if (isoStr.includes('T')) {
-    const timePart = isoStr.split('T')[1];
-    return timePart.substring(0, 5);
+    return isoStr.split('T')[1].substring(0, 5);
   }
   return isoStr;
 }
@@ -30,7 +30,7 @@ function formatDateString(isoStr: string): string {
       return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
     }
   } catch {
-    // ignore
+    // fallback
   }
   if (isoStr.includes('T')) {
     return isoStr.split('T')[0];
@@ -43,53 +43,76 @@ export const PredictionCard: React.FC<PredictionCardProps> = ({ prediction }) =>
 
   let horizonLabel = 'Next Station';
   let horizonClass = 'horizon-tag h1';
+  let horizonColor = 'blue';
 
   if (horizon === 2) {
     horizonLabel = '2 Stations Ahead';
     horizonClass = 'horizon-tag h2';
+    horizonColor = 'teal';
   } else if (horizon === 3) {
     horizonLabel = '3 Stations Ahead';
     horizonClass = 'horizon-tag h3';
+    horizonColor = 'indigo';
   }
 
   const predDelay = prediction.predicted_delay_minutes ?? 0;
-  const isDelayEarly = predDelay < 0;
-  const delayDisplay = isDelayEarly
+  const isEarly = predDelay < 0;
+  const delayDisplay = isEarly
     ? `${predDelay.toFixed(1)} min (Early)`
     : predDelay === 0
-    ? '0.0 min (On Time)'
-    : `+${predDelay.toFixed(1)} min`;
+    ? 'On Time (0.0 min)'
+    : `+${predDelay.toFixed(1)} min delay`;
 
-  const delayColor = predDelay <= 5 ? 'var(--color-ontime)' : predDelay <= 20 ? 'var(--color-moderate)' : 'var(--color-severe)';
+  const delaySeverity = predDelay <= 5 ? 'ontime' : predDelay <= 20 ? 'moderate' : 'severe';
 
   return (
-    <div className="prediction-card">
+    <div className={`prediction-card horizon-${horizonColor}`}>
+      {/* Top Header */}
       <div className="pred-card-header">
-        <span className={horizonClass}>{horizonLabel}</span>
-        <span className="target-station-name">{prediction.station}</span>
+        <div className="pred-horizon-group">
+          <span className={horizonClass}>Horizon {horizon}</span>
+          <span className="pred-horizon-subtitle">{horizonLabel}</span>
+        </div>
+        <div className="target-station-pill">
+          <span className="target-station-name">{prediction.station}</span>
+        </div>
       </div>
 
+      {/* Comparison Grid: Scheduled vs Predicted ETA */}
       <div className="times-comparison-grid">
-        <div className="time-box">
-          <div className="time-box-label">Scheduled</div>
-          <div className="time-box-value">{formatTimeString(prediction.scheduled_arrival)}</div>
-          <div style={{ fontSize: '0.6875rem', color: 'var(--text-muted)', marginTop: '0.15rem' }}>
+        <div className="time-comparison-col scheduled">
+          <span className="col-label">
+            <Clock size={12} />
+            Scheduled
+          </span>
+          <div className="col-time-display">{formatTimeString(prediction.scheduled_arrival)}</div>
+          <span className="col-date-display">
+            <Calendar size={11} />
             {formatDateString(prediction.scheduled_arrival)}
-          </div>
+          </span>
         </div>
 
-        <div className="time-box eta-box">
-          <div className="time-box-label">Predicted ETA</div>
-          <div className="time-box-value">{formatTimeString(prediction.predicted_eta)}</div>
-          <div style={{ fontSize: '0.6875rem', color: 'var(--brand-blue)', marginTop: '0.15rem' }}>
+        <div className="time-comparison-divider" aria-hidden="true">
+          <ArrowUpRight size={16} />
+        </div>
+
+        <div className="time-comparison-col predicted">
+          <span className="col-label highlight">
+            <Navigation size={12} />
+            Predicted ETA
+          </span>
+          <div className="col-time-display eta">{formatTimeString(prediction.predicted_eta)}</div>
+          <span className="col-date-display eta">
+            <Calendar size={11} />
             {formatDateString(prediction.predicted_eta)}
-          </div>
+          </span>
         </div>
       </div>
 
-      <div className="pred-delay-row">
-        <span className="pred-delay-label">Predicted Delay:</span>
-        <span className="pred-delay-value" style={{ color: delayColor }}>
+      {/* Bottom Delay Row */}
+      <div className="pred-delay-footer">
+        <span className="footer-label">Predicted Delay:</span>
+        <span className={`pred-delay-badge ${delaySeverity}`}>
           {delayDisplay}
         </span>
       </div>

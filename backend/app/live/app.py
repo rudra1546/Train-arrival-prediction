@@ -11,7 +11,7 @@ Endpoints:
 import time
 import logging
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, HTTPException, Query, status, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +20,15 @@ from app.live.config import is_live_configured, mask_secret, get_api_key, RAILRA
 from app.live.service import LiveETAService
 from app.live.api_client import MockRailRadarClient, RailRadarLiveClient
 from app.live.cache import eta_cache
+from app.live.schedule_search import (
+    search_stations,
+    search_train_routes,
+    get_train_route_schedule,
+    get_station_coordinates,
+    StationSearchResult,
+    TrainSearchResponse,
+    TrainRouteScheduleResponse
+)
 from ml.inference.predictor import MultiHorizonETAPredictor
 from app.live.exceptions import (
     APIKeyMissingError,
@@ -229,6 +238,102 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
         except Exception as e:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Unexpected error: {str(e)}")
+
+    # -------------------------------------------------------------------------
+    # Station Autocomplete & Master Lookup Endpoint
+    # -------------------------------------------------------------------------
+    @app.get("/api/stations/search", response_model=List[StationSearchResult], tags=["Schedule Search"])
+    def get_station_autocomplete(
+        q: str = Query("", description="Station code or name query"),
+        limit: int = Query(10, ge=1, le=50, description="Max station suggestions")
+    ):
+        """
+        Search stations across Indian Railways master dataset for autocomplete and selection.
+        Matches station codes (e.g. NDLS, ADI) and station/city names.
+        """
+        try:
+            return search_stations(query=q, limit=limit)
+        except Exception as e:
+            logger.error("Station search error: query='%s' error=%s", q, str(e))
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to search stations.")
+
+    # -------------------------------------------------------------------------
+    # Train Route Search Endpoint
+    # -------------------------------------------------------------------------
+    @app.get("/api/trains/search", response_model=TrainSearchResponse, tags=["Schedule Search"])
+    def search_trains(
+        from_station: str = Query(..., alias="from", description="Origin station code or name"),
+        to_station: str = Query(..., alias="to", description="Destination station code or name"),
+        date: Optional[str] = Query(None, description="Journey date YYYY-MM-DD (optional)")
+    ):
+        """
+        Search real railway schedules for trains connecting origin and destination.
+        Guarantees origin occurs BEFORE destination along the scheduled route.
+        Returns complete information for train result cards.
+        """
+        start_time = time.monotonic()
+        clean_from = from_station.strip()
+        clean_to = to_station.strip()
+
+        # Log public route parameters only (never logs secrets)
+        logger.info("Train route search requested: from=%s to=%s date=%s", clean_from, clean_to, date)
+
+        try:
+            result = search_train_routes(
+                from_input=clean_from,
+                to_input=clean_to,
+                journey_date=date
+            )
+            elapsed_ms = (time.monotonic() - start_time) * 1000.0
+            logger.info(
+                "Train route search [HIT] from=%s to=%s found=%d elapsed=%.1fms",
+                clean_from, clean_to, result.count, elapsed_ms
+            )
+            return result
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error("Unexpected error in train search: from=%s to=%s error=%s", clean_from, clean_to, str(e))
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Internal server error processing train search."
+            )
+
+    # -------------------------------------------------------------------------
+    # Train Scheduled Route Stops Endpoint
+    # -------------------------------------------------------------------------
+    @app.get("/api/train/{train_no}/route", response_model=TrainRouteScheduleResponse, tags=["Schedule Search"])
+    def get_train_route(train_no: str):
+        """
+        Return all real scheduled stops for a train from origin to terminus.
+        Used by Live Tracking to display complete route progression.
+        """
+        clean_no = str(train_no).strip()
+        route = get_train_route_schedule(clean_no)
+        if not route:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Route schedule for train '{clean_no}' not found in database."
+            )
+        return route
+
+    # -------------------------------------------------------------------------
+    # Station Coordinates Lookup Endpoint
+    # -------------------------------------------------------------------------
+    @app.get("/api/station/{station_code}/coordinates", tags=["Schedule Search"])
+    def get_station_coords(station_code: str):
+        """
+        Return real geographic latitude & longitude coordinates for a railway station.
+        Used by the interactive railway map.
+        """
+        clean_code = str(station_code).strip().upper()
+        coords = get_station_coordinates(clean_code)
+        if not coords:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Coordinates for station '{clean_code}' are unavailable."
+            )
+        return coords
 
     return app
 
