@@ -409,6 +409,116 @@ button, input {
   to { transform: rotate(360deg); }
 }
 
+/* =============================================================================
+   Dashboard Top Cinematic Train Banner
+   ============================================================================= */
+.dashboard-top-banner {
+  width: 100%;
+  position: relative;
+  background-color: #0b132b;
+  background-image: url('./assets/train-banner.jpg');
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  border-bottom: 1px solid var(--border-color);
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.banner-dark-overlay {
+  width: 100%;
+  min-height: 180px;
+  background: linear-gradient(
+    90deg,
+    rgba(10, 17, 30, 0.94) 0%,
+    rgba(15, 23, 42, 0.84) 40%,
+    rgba(15, 23, 42, 0.50) 75%,
+    rgba(15, 23, 42, 0.25) 100%
+  );
+  padding: 2.25rem 2.5rem;
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+}
+
+.banner-inner-content {
+  max-width: 800px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  z-index: 2;
+}
+
+.banner-pill-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  align-self: flex-start;
+  padding: 0.3rem 0.8rem;
+  border-radius: var(--radius-pill, 9999px);
+  background: rgba(14, 165, 233, 0.15);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  color: #38bdf8;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  backdrop-filter: blur(8px);
+}
+
+.banner-pulse-indicator {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: #10b981;
+  box-shadow: 0 0 8px #10b981;
+  animation: pulse-dot 2s infinite ease-in-out;
+}
+
+.banner-badge-icon {
+  color: #38bdf8;
+}
+
+.banner-headline {
+  margin: 0;
+  font-size: 1.85rem;
+  font-weight: 800;
+  color: #ffffff;
+  letter-spacing: -0.025em;
+  line-height: 1.2;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.6);
+}
+
+.banner-subtext {
+  margin: 0;
+  font-size: 0.9375rem;
+  color: rgba(226, 232, 240, 0.9);
+  line-height: 1.5;
+  max-width: 650px;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.5);
+}
+
+.banner-features-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.25rem;
+  flex-wrap: wrap;
+}
+
+.banner-feature-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: rgba(226, 232, 240, 0.85);
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 0.25rem 0.65rem;
+  border-radius: 6px;
+  backdrop-filter: blur(6px);
+}
+
 /* -----------------------------------------------------------------------------
    3. Main Dashboard Content Area
    ----------------------------------------------------------------------------- */
@@ -1997,9 +2107,46 @@ button, input {
   .dashboard-content-area {
     padding: 1.5rem 1.5rem 2.5rem;
   }
+
+  .banner-dark-overlay {
+    padding: 1.75rem 1.5rem;
+    min-height: 160px;
+    background: linear-gradient(
+      90deg,
+      rgba(10, 17, 30, 0.95) 0%,
+      rgba(15, 23, 42, 0.88) 50%,
+      rgba(15, 23, 42, 0.55) 100%
+    );
+  }
+
+  .banner-headline {
+    font-size: 1.5rem;
+  }
 }
 
 @media (max-width: 640px) {
+  .banner-dark-overlay {
+    padding: 1.25rem 1rem;
+    min-height: auto;
+    background: linear-gradient(
+      180deg,
+      rgba(10, 17, 30, 0.95) 0%,
+      rgba(15, 23, 42, 0.88) 100%
+    );
+  }
+
+  .banner-headline {
+    font-size: 1.25rem;
+  }
+
+  .banner-subtext {
+    font-size: 0.8125rem;
+  }
+
+  .banner-features-row {
+    display: none;
+  }
+
   .app-top-header {
     padding: 0 1rem;
     height: auto;

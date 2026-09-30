@@ -5,6 +5,7 @@ import { RouteSearchPage } from './components/RouteSearchPage';
 import { LiveTrackingPage } from './components/LiveTrackingPage';
 import { ETAPredictionPage } from './components/ETAPredictionPage';
 import { DashboardOverview } from './components/DashboardOverview';
+import { DashboardBanner } from './components/DashboardBanner';
 import { checkBackendHealth } from './services/api';
 import {
   getLastSearchedTrain,
@@ -124,17 +125,20 @@ export const App: React.FC = () => {
             />
           </main>
         ) : (
-          <main className="dashboard-content-area dashboard-page-view">
-            <DashboardOverview
-              savedTrain={savedTrain}
-              onNavigateToSearch={() => setActiveTab('search')}
-              onNavigateToTracking={handleViewLiveTracking}
-              onNavigateToPrediction={handleViewETAPrediction}
-              onClearTrain={handleClearSelectedTrain}
-              refreshTrigger={refreshCounter}
-              onLoadingChange={setIsLoading}
-            />
-          </main>
+          <>
+            <DashboardBanner />
+            <main className="dashboard-content-area dashboard-page-view">
+              <DashboardOverview
+                savedTrain={savedTrain}
+                onNavigateToSearch={() => setActiveTab('search')}
+                onNavigateToTracking={handleViewLiveTracking}
+                onNavigateToPrediction={handleViewETAPrediction}
+                onClearTrain={handleClearSelectedTrain}
+                refreshTrigger={refreshCounter}
+                onLoadingChange={setIsLoading}
+              />
+            </main>
+          </>
         )}
 
         {/* Platform Footer */}
