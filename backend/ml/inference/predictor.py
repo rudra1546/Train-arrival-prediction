@@ -7,12 +7,13 @@ XGBoost booster inference for H1/H2/H3, and dynamic ETA calculation.
 from datetime import datetime, date
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
+import sqlite3
 import numpy as np
 import pandas as pd
 import polars as pl
 import xgboost as xgb
 
-from ml.utils.config import MODELS_DIR
+from ml.utils.config import MODELS_DIR, resolve_search_db_path, KNOWN_STATION_ZONES
 from ml.data.loader import load_schedule, load_station_master, load_train_details
 from ml.inference.schemas import (
     PredictionRequest,
@@ -53,11 +54,151 @@ class MultiHorizonETAPredictor:
 
     def _init_timetable_index(self) -> None:
         """Index timetable routes and master station lists for O(1) in-memory lookup."""
+        db_path = resolve_search_db_path()
+        if db_path.exists():
+            self._init_from_db(db_path)
+        else:
+            self._init_from_raw_csv()
+
+    def _init_from_db(self, db_path: Path) -> None:
+        """Load timetable index from deployment-ready SQLite database."""
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+
+        # 1. Station zones & names
+        stn_rows = cur.execute("SELECT code, name, zone FROM stations").fetchall()
+        self.station_zones = {code.upper(): (zone or "NR").strip() for code, name, zone in stn_rows}
+        self.station_full_names = {code.upper(): (name or code).strip() for code, name, zone in stn_rows}
+
+        # Augment known modern station zones
+        for code, zone in KNOWN_STATION_ZONES.items():
+            if code not in self.station_zones:
+                self.station_zones[code] = zone
+                self.station_full_names[code] = f"Station {code}"
+        self.known_stations = set(self.station_zones.keys())
+
+        # 2. Train types & names
+        train_rows = cur.execute("SELECT train_no, train_name, type_code FROM trains").fetchall()
+        self.train_types = {str(t_no).zfill(5): (t_type or "EXP-TRAINS").strip() for t_no, t_name, t_type in train_rows}
+        self.train_names = {str(t_no).zfill(5): (t_name or f"Train {t_no}").strip() for t_no, t_name, t_type in train_rows}
+        self.known_trains_details = set(self.train_types.keys())
+
+        # 3. Schedule routes
+        sched_rows = cur.execute(
+            "SELECT train_no, station_no, station_code, arrival_time, departure_time, distance "
+            "FROM schedules ORDER BY train_no, station_no"
+        ).fetchall()
+        conn.close()
+
+        def to_min(t: Optional[str]) -> Optional[int]:
+            if not t or ":" not in t:
+                return None
+            parts = t.split(":")
+            try:
+                return int(parts[0]) * 60 + int(parts[1])
+            except (ValueError, IndexError):
+                return None
+
+        self.routes: Dict[str, List[Dict[str, Any]]] = {}
+        self.route_station_indices: Dict[str, Dict[str, int]] = {}
+
+        current_train_no: Optional[str] = None
+        current_stops: List[Dict[str, Any]] = []
+        day = 1
+        prev_m: Optional[int] = None
+
+        for t_no_raw, s_no, s_code_raw, arr, dep, dist in sched_rows:
+            t_no = str(t_no_raw).strip().zfill(5)
+            s_code = str(s_code_raw).strip().upper()
+
+            if t_no != current_train_no:
+                if current_train_no is not None:
+                    self._finalize_train_route(current_train_no, current_stops)
+                current_train_no = t_no
+                current_stops = []
+                day = 1
+                prev_m = None
+
+            arr_m = to_min(arr)
+            dep_m = to_min(dep)
+
+            # Cumulative day rollover progression
+            if arr_m is not None and prev_m is not None and arr_m < prev_m:
+                day += 1
+            arr_day = day
+
+            check_m = arr_m if arr_m is not None else prev_m
+            if dep_m is not None and check_m is not None and dep_m < check_m:
+                day += 1
+            dep_day = day
+
+            prev_m = dep_m if dep_m is not None else arr_m
+
+            current_stops.append({
+                "train_no": t_no,
+                "sched_station_no": int(s_no),
+                "station_name": s_code,
+                "arrival_time": arr or None,
+                "departure_time": dep or None,
+                "distance_from_origin": int(dist or 0),
+                "arr_min": arr_m,
+                "dep_min": dep_m,
+                "arrival_day": arr_day,
+                "departure_day": dep_day,
+            })
+
+        if current_train_no is not None:
+            self._finalize_train_route(current_train_no, current_stops)
+
+        self.known_trains = set(self.routes.keys())
+
+    def _finalize_train_route(self, train_no: str, stops: List[Dict[str, Any]]) -> None:
+        """Compute route section metrics, dwell times, and station indices."""
+        self.routes[train_no] = stops
+        self.route_station_indices[train_no] = {}
+
+        num_stops = len(stops)
+        for i, stop in enumerate(stops):
+            self.route_station_indices[train_no][stop["station_name"]] = i
+
+            # Scheduled dwell time in minutes
+            if stop["dep_min"] is not None and stop["arr_min"] is not None:
+                stop["scheduled_dwell_time"] = (
+                    (stop["departure_day"] - stop["arrival_day"]) * 1440 + stop["dep_min"] - stop["arr_min"]
+                )
+            else:
+                stop["scheduled_dwell_time"] = 0.0
+
+            # Next station planned attributes
+            if i < num_stops - 1:
+                nxt = stops[i + 1]
+                dist_diff = nxt["distance_from_origin"] - stop["distance_from_origin"]
+                stop["sched_section_distance"] = dist_diff
+                if nxt["arr_min"] is not None and stop["dep_min"] is not None:
+                    trav_time = (
+                        (nxt["arrival_day"] - stop["departure_day"]) * 1440 + nxt["arr_min"] - stop["dep_min"]
+                    )
+                    stop["sched_section_travel_time"] = trav_time
+                    if trav_time > 0 and dist_diff > 0:
+                        stop["sched_planned_speed"] = dist_diff / (trav_time / 60.0)
+                    else:
+                        stop["sched_planned_speed"] = None
+                else:
+                    stop["sched_section_travel_time"] = None
+                    stop["sched_planned_speed"] = None
+                stop["sched_next_zone"] = self.station_zones.get(nxt["station_name"], "NR")
+            else:
+                stop["sched_section_distance"] = None
+                stop["sched_section_travel_time"] = None
+                stop["sched_planned_speed"] = None
+                stop["sched_next_zone"] = None
+
+    def _init_from_raw_csv(self) -> None:
+        """Legacy initialization from raw CSV datasets if SQLite database is absent."""
         sched_df, _ = load_schedule()
         stn_df, _ = load_station_master()
         td_df, _ = load_train_details()
 
-        # Station zone and full name dictionaries
         self.station_zones = dict(zip(
             stn_df["station_name"].to_list(),
             stn_df["station_zone"].to_list()
@@ -68,7 +209,6 @@ class MultiHorizonETAPredictor:
         ))
         self.known_stations = set(self.station_zones.keys())
 
-        # Train type code and train name dictionaries
         self.train_types = dict(zip(
             td_df["train_no"].to_list(),
             td_df["type_code"].to_list()
@@ -79,18 +219,16 @@ class MultiHorizonETAPredictor:
         ))
         self.known_trains_details = set(self.train_types.keys())
 
-        # Build route sequence index per train_no
-        self.routes: Dict[str, List[Dict[str, Any]]] = {}
-        self.route_station_indices: Dict[str, Dict[str, int]] = {}
+        self.routes = {}
+        self.route_station_indices = {}
 
-        # Sort schedule deterministically
         sorted_sched = sched_df.sort(["train_no", "sched_station_no"])
         for row in sorted_sched.iter_rows(named=True):
             t_no = row["train_no"]
             if t_no not in self.routes:
                 self.routes[t_no] = []
                 self.route_station_indices[t_no] = {}
-            
+
             idx = len(self.routes[t_no])
             self.routes[t_no].append(row)
             self.route_station_indices[t_no][row["station_name"]] = idx

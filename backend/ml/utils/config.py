@@ -2,11 +2,20 @@
 Configuration and constants for SIH 26028 ETA Prediction Pipeline.
 """
 
+import os
 from pathlib import Path
 
 # Base directories
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-BASE_DIR = _REPO_ROOT if (_REPO_ROOT / "data").exists() else Path("e:/train")
+if (_REPO_ROOT / "data").exists():
+    BASE_DIR = _REPO_ROOT
+elif (Path.cwd().parent / "data").exists():
+    BASE_DIR = Path.cwd().parent
+elif (Path.cwd() / "data").exists():
+    BASE_DIR = Path.cwd()
+else:
+    BASE_DIR = _REPO_ROOT
+
 DATA_DIR = BASE_DIR / "data"
 RAW_DATA_DIR = DATA_DIR / "raw"
 PROCESSED_DATA_DIR = DATA_DIR / "processed"
@@ -15,7 +24,42 @@ MODELS_DIR = BASE_DIR / "backend" / "models"
 
 # Ensure directories exist
 for path in [RAW_DATA_DIR, PROCESSED_DATA_DIR, REPORTS_DIR, MODELS_DIR]:
-    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+
+def resolve_search_db_path() -> Path:
+    """
+    Resolve the deployment-safe SQLite timetable database path.
+    Supports:
+    - RAILWAY_SEARCH_DB environment variable override.
+    - Repository root relative to backend code: backend/ml/utils/config.py -> 4 parents up -> data/processed/railway_search.db
+    - Parent of current working directory (e.g. Render with Root Directory = backend)
+    - Current working directory (when CWD is repo root)
+    - PROCESSED_DATA_DIR
+    """
+    env_override = os.getenv("RAILWAY_SEARCH_DB", "").strip()
+    if env_override:
+        return Path(env_override).resolve()
+
+    candidate = (_REPO_ROOT / "data" / "processed" / "railway_search.db").resolve()
+    if candidate.exists():
+        return candidate
+
+    candidate = (Path.cwd().parent / "data" / "processed" / "railway_search.db").resolve()
+    if candidate.exists():
+        return candidate
+
+    candidate = (Path.cwd() / "data" / "processed" / "railway_search.db").resolve()
+    if candidate.exists():
+        return candidate
+
+    return (PROCESSED_DATA_DIR / "railway_search.db").resolve()
+
+
+SEARCH_DB_PATH = resolve_search_db_path()
 
 # Raw file paths
 DELAY_FILE = RAW_DATA_DIR / "combined_delay.csv"
