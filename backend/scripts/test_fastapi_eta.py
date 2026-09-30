@@ -29,7 +29,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # Ensure clean environment
-from app.live.config import load_env_file, mask_secret, get_api_key
+from app.live.config import load_env_file, mask_secret, get_api_key, get_cors_origins
 load_env_file(PROJECT_ROOT / ".env", override=True)
 
 from app.live.app import app
@@ -49,7 +49,7 @@ class FastAPITestRunner:
     def __init__(self):
         self.passed = 0
         self.failed = 0
-        self.total = 13
+        self.total = 14
         self.client = TestClient(app)
 
     def report(self, test_num: int, name: str, success: bool, details: str = ""):
@@ -310,6 +310,24 @@ class FastAPITestRunner:
                         f"Hit verified: 1st={elapsed1:.1f}ms, 2nd={elapsed2:.1f}ms (Cache Stats: {stats_after})")
         except Exception as e:
             self.report(13, "Cache behavior", False, str(e))
+
+        # Test 14: CORS origins configuration and preflight handling
+        try:
+            origins = get_cors_origins()
+            assert "http://localhost:5173" in origins, f"http://localhost:5173 should be in CORS origins, got {origins}"
+
+            headers = {
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": "GET"
+            }
+            resp = self.client.options("/api/health", headers=headers)
+            assert resp.headers.get("access-control-allow-origin") == "http://localhost:5173", (
+                f"Expected access-control-allow-origin: http://localhost:5173, got {resp.headers.get('access-control-allow-origin')}"
+            )
+            self.report(14, "CORS origins configuration", True,
+                        f"Origins: {origins}, Preflight matched: {resp.headers.get('access-control-allow-origin')}")
+        except Exception as e:
+            self.report(14, "CORS origins configuration", False, str(e))
 
         # Clean up app.state.live_client after tests
         app.state.live_client = None

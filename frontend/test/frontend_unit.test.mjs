@@ -144,6 +144,24 @@ describe('Security Verification in Frontend Codebase', () => {
     assert.equal(apiCode.includes('Authorization'), false);
     assert.equal(apiCode.includes('Bearer'), false);
   });
+
+  test('Ensures frontend environment configuration contains only non-secret public variables', async () => {
+    const fs = await import('node:fs');
+    const frontendEnv = fs.readFileSync(new URL('../.env', import.meta.url), 'utf-8');
+    assert.equal(frontendEnv.includes('VITE_API_BASE_URL='), true);
+    assert.equal(frontendEnv.includes('RAILRADAR_API_KEY'), false);
+    assert.equal(frontendEnv.includes('SECRET'), false);
+
+    const frontendEnvExample = fs.readFileSync(new URL('../.env.example', import.meta.url), 'utf-8');
+    assert.equal(frontendEnvExample.includes('VITE_API_BASE_URL='), true);
+    assert.equal(frontendEnvExample.includes('RAILRADAR_API_KEY'), false);
+
+    const rootEnvExample = fs.readFileSync(new URL('../../.env.example', import.meta.url), 'utf-8');
+    // Ensure .env.example does not contain an actual RailRadar API key value matching secret format
+    const hasActualKeyFormat = /(?:rg_|rr_|live_)[a-zA-Z0-9_-]{16,}|=[a-f0-9]{32,}/i.test(rootEnvExample);
+    assert.equal(hasActualKeyFormat, false);
+    assert.equal(rootEnvExample.includes('CORS_ORIGINS='), true);
+  });
 });
 
 // Test 5: Route and Station Search Logic

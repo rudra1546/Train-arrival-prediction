@@ -58,3 +58,16 @@ RAILRADAR_BASE_URL: str = os.getenv("RAILRADAR_BASE_URL", "https://api.railradar
 RAILRADAR_TIMEOUT_SECONDS: float = float(os.getenv("RAILRADAR_TIMEOUT_SECONDS", "10.0"))
 RAILRADAR_CACHE_TTL_SECONDS: float = float(os.getenv("RAILRADAR_CACHE_TTL_SECONDS", "30.0"))
 APP_ENV: str = os.getenv("APP_ENV", "development").lower()
+
+
+def get_cors_origins() -> list[str]:
+    """Parse comma-separated CORS_ORIGINS from environment into a list of origins."""
+    raw = os.getenv("CORS_ORIGINS", "http://localhost:5173").strip()
+    if not raw:
+        return ["http://localhost:5173"]
+    origins = [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return origins if origins else ["http://localhost:5173"]
+
+
+CORS_ORIGINS: list[str] = get_cors_origins()
+

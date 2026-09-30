@@ -16,7 +16,13 @@ from fastapi import FastAPI, HTTPException, Query, status, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.live.config import is_live_configured, mask_secret, get_api_key, RAILRADAR_CACHE_TTL_SECONDS
+from app.live.config import (
+    is_live_configured,
+    mask_secret,
+    get_api_key,
+    RAILRADAR_CACHE_TTL_SECONDS,
+    get_cors_origins
+)
 from app.live.service import LiveETAService
 from app.live.api_client import MockRailRadarClient, RailRadarLiveClient
 from app.live.cache import eta_cache
@@ -74,9 +80,10 @@ def create_app() -> FastAPI:
     )
 
     # Enable CORS for frontend dashboard / external consumers
+    cors_origins = get_cors_origins()
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
