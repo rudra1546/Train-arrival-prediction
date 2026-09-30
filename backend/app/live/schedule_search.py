@@ -20,15 +20,95 @@ from ml.utils.config import PROCESSED_DATA_DIR
 
 logger = logging.getLogger("sih26028.search")
 
-SEARCH_DB_PATH = Path(os.getenv("RAILWAY_SEARCH_DB", str(PROCESSED_DATA_DIR / "railway_search.db")))
-COORDS_JSON_PATH = PROCESSED_DATA_DIR / "station_coordinates.json"
+
+def resolve_search_db_path() -> Path:
+    """
+    Resolve the SQLite database path for Indian Railways timetable search.
+    Supports:
+    - RAILWAY_SEARCH_DB environment variable override (if configured).
+    - Repository root relative to this file: backend/app/live/schedule_search.py -> 4 parents up -> data/processed/railway_search.db
+    - Parent of current working directory (e.g. Render with Root Directory = backend)
+    - Current working directory (when CWD is repository root)
+    - PROCESSED_DATA_DIR from ml.utils.config
+    """
+    env_override = os.getenv("RAILWAY_SEARCH_DB", "").strip()
+    if env_override:
+        return Path(env_override).resolve()
+
+    # Candidate 1: 4 levels up from this file: backend/app/live/schedule_search.py -> repo root
+    repo_root = Path(__file__).resolve().parent.parent.parent.parent
+    repo_db = (repo_root / "data" / "processed" / "railway_search.db").resolve()
+    if repo_db.exists():
+        return repo_db
+
+    # Candidate 2: Parent of current working directory (e.g. when CWD is 'backend')
+    parent_cwd_db = (Path.cwd().parent / "data" / "processed" / "railway_search.db").resolve()
+    if parent_cwd_db.exists():
+        return parent_cwd_db
+
+    # Candidate 3: Current working directory (when CWD is repo root)
+    cwd_db = (Path.cwd() / "data" / "processed" / "railway_search.db").resolve()
+    if cwd_db.exists():
+        return cwd_db
+
+    # Candidate 4: PROCESSED_DATA_DIR from ml.utils.config
+    try:
+        proc_db = (PROCESSED_DATA_DIR / "railway_search.db").resolve()
+        if proc_db.exists():
+            return proc_db
+    except Exception:
+        pass
+
+    return repo_db
+
+
+def resolve_coords_json_path(db_path: Optional[Path] = None) -> Path:
+    """
+    Resolve station coordinates JSON path.
+    """
+    env_override = os.getenv("STATION_COORDINATES_JSON", "").strip()
+    if env_override:
+        return Path(env_override).resolve()
+
+    if db_path is not None:
+        sibling = (db_path.parent / "station_coordinates.json").resolve()
+        if sibling.exists():
+            return sibling
+
+    repo_root = Path(__file__).resolve().parent.parent.parent.parent
+    repo_coords = (repo_root / "data" / "processed" / "station_coordinates.json").resolve()
+    if repo_coords.exists():
+        return repo_coords
+
+    parent_cwd_coords = (Path.cwd().parent / "data" / "processed" / "station_coordinates.json").resolve()
+    if parent_cwd_coords.exists():
+        return parent_cwd_coords
+
+    cwd_coords = (Path.cwd() / "data" / "processed" / "station_coordinates.json").resolve()
+    if cwd_coords.exists():
+        return cwd_coords
+
+    try:
+        proc_coords = (PROCESSED_DATA_DIR / "station_coordinates.json").resolve()
+        if proc_coords.exists():
+            return proc_coords
+    except Exception:
+        pass
+
+    return repo_coords
+
+
+SEARCH_DB_PATH: Path = resolve_search_db_path()
+COORDS_JSON_PATH: Path = resolve_coords_json_path(SEARCH_DB_PATH)
 
 _COORDS_CACHE: Optional[Dict[str, List[float]]] = None
 
 
 def get_station_coords_cache() -> Dict[str, List[float]]:
-    global _COORDS_CACHE
+    global _COORDS_CACHE, COORDS_JSON_PATH
     if _COORDS_CACHE is None:
+        if not COORDS_JSON_PATH.exists():
+            COORDS_JSON_PATH = resolve_coords_json_path(SEARCH_DB_PATH)
         if COORDS_JSON_PATH.exists():
             try:
                 with open(COORDS_JSON_PATH, "r", encoding="utf-8") as f:
@@ -105,6 +185,10 @@ def get_db_connection() -> sqlite3.Connection:
     Get a read-only SQLite connection to the railway search database.
     Verifies that the database exists before connecting.
     """
+    global SEARCH_DB_PATH
+    if not SEARCH_DB_PATH.exists():
+        SEARCH_DB_PATH = resolve_search_db_path()
+
     if not SEARCH_DB_PATH.exists():
         logger.warning("Search database not found at %s. Attempting to build...", SEARCH_DB_PATH)
         from scripts.build_railway_search_db import build_search_db

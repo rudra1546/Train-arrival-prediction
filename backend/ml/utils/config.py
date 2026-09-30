@@ -5,7 +5,8 @@ Configuration and constants for SIH 26028 ETA Prediction Pipeline.
 from pathlib import Path
 
 # Base directories
-BASE_DIR = Path("e:/train")
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+BASE_DIR = _REPO_ROOT if (_REPO_ROOT / "data").exists() else Path("e:/train")
 DATA_DIR = BASE_DIR / "data"
 RAW_DATA_DIR = DATA_DIR / "raw"
 PROCESSED_DATA_DIR = DATA_DIR / "processed"

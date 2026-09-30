@@ -47,6 +47,49 @@ class RouteSearchTestRunner:
         print("=" * 70)
 
         # -------------------------------------------------------------
+        # Group 0: Database and Resource Path Resolution Tests
+        # -------------------------------------------------------------
+        print("\n--- 0. DATABASE PATH RESOLUTION TESTS ---")
+        from app.live.schedule_search import SEARCH_DB_PATH, COORDS_JSON_PATH, resolve_search_db_path
+
+        resolved_db = resolve_search_db_path()
+        db_exists = resolved_db.exists()
+        is_correct_file = resolved_db.name == "railway_search.db"
+        points_to_processed_data = (
+            resolved_db.parent.name == "processed"
+            and resolved_db.parent.parent.name == "data"
+        )
+        self.report(
+            "Resolved search database exists and points to data/processed/railway_search.db",
+            db_exists and is_correct_file and points_to_processed_data,
+            f"Path: {resolved_db} (exists={db_exists})"
+        )
+
+        coords_exists = COORDS_JSON_PATH.exists()
+        coords_correct = (
+            COORDS_JSON_PATH.name == "station_coordinates.json"
+            and COORDS_JSON_PATH.parent.name == "processed"
+        )
+        self.report(
+            "Station coordinates path exists and points to data/processed/station_coordinates.json",
+            coords_exists and coords_correct,
+            f"Path: {COORDS_JSON_PATH} (exists={coords_exists})"
+        )
+
+        # Test 0.3: Environment variable override support
+        test_env_path = "/tmp/test_railway_search.db"
+        os.environ["RAILWAY_SEARCH_DB"] = test_env_path
+        try:
+            env_override_db = resolve_search_db_path()
+            self.report(
+                "RAILWAY_SEARCH_DB environment variable override respected",
+                str(env_override_db).replace("\\", "/").endswith("test_railway_search.db"),
+                f"Resolved override: {env_override_db}"
+            )
+        finally:
+            del os.environ["RAILWAY_SEARCH_DB"]
+
+        # -------------------------------------------------------------
         # Group 1: Station Search / Autocomplete Tests
         # -------------------------------------------------------------
         print("\n--- 1. STATION SEARCH TESTS ---")
