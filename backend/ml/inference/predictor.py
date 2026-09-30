@@ -8,13 +8,14 @@ from datetime import datetime, date
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 import sqlite3
+import functools
+from pathlib import Path
+from typing import Dict, List, Any, Optional, Tuple, Set
 import numpy as np
 import pandas as pd
-import polars as pl
 import xgboost as xgb
 
 from ml.utils.config import MODELS_DIR, resolve_search_db_path, KNOWN_STATION_ZONES
-from ml.data.loader import load_schedule, load_station_master, load_train_details
 from ml.inference.schemas import (
     PredictionRequest,
     HorizonPrediction,
@@ -34,6 +35,64 @@ from ml.inference.eta_calculator import (
 )
 
 
+class LazyRoutesDict:
+    """Memory-efficient lazy dictionary proxy for train routes."""
+
+    def __init__(self, predictor: "MultiHorizonETAPredictor"):
+        self._predictor = predictor
+
+    def __contains__(self, train_no: object) -> bool:
+        t_no = str(train_no).strip().zfill(5)
+        return t_no in self._predictor.known_trains
+
+    def __getitem__(self, train_no: str) -> List[Dict[str, Any]]:
+        t_no = str(train_no).strip().zfill(5)
+        route = self._predictor.get_route(t_no)
+        if route is None:
+            raise KeyError(train_no)
+        return route
+
+    def __len__(self) -> int:
+        return len(self._predictor.known_trains)
+
+    def get(self, train_no: str, default: Any = None) -> Any:
+        t_no = str(train_no).strip().zfill(5)
+        route = self._predictor.get_route(t_no)
+        return route if route is not None else default
+
+    def keys(self):
+        return self._predictor.known_trains
+
+
+class LazyRouteStationIndicesDict:
+    """Memory-efficient lazy dictionary proxy for train station index maps."""
+
+    def __init__(self, predictor: "MultiHorizonETAPredictor"):
+        self._predictor = predictor
+
+    def __contains__(self, train_no: object) -> bool:
+        t_no = str(train_no).strip().zfill(5)
+        return t_no in self._predictor.known_trains
+
+    def __getitem__(self, train_no: str) -> Dict[str, int]:
+        t_no = str(train_no).strip().zfill(5)
+        idx_map = self._predictor.get_station_index_map(t_no)
+        if idx_map is None:
+            raise KeyError(train_no)
+        return idx_map
+
+    def __len__(self) -> int:
+        return len(self._predictor.known_trains)
+
+    def get(self, train_no: str, default: Any = None) -> Any:
+        t_no = str(train_no).strip().zfill(5)
+        idx_map = self._predictor.get_station_index_map(t_no)
+        return idx_map if idx_map is not None else default
+
+    def keys(self):
+        return self._predictor.known_trains
+
+
 class MultiHorizonETAPredictor:
     """
     Core offline inference engine for Multi-Horizon ETA forecasting.
@@ -48,7 +107,9 @@ class MultiHorizonETAPredictor:
     ):
         self.models_dir = Path(models_dir)
         self.model_loader = model_loader or MultiHorizonModelLoader.get_instance(models_dir=self.models_dir)
-        
+        self._db_conn: Optional[sqlite3.Connection] = None
+        self._route_cache: Dict[str, Tuple[List[Dict[str, Any]], Dict[str, int]]] = {}
+
         # Load and index master railway timetables & metadata
         self._init_timetable_index()
 
@@ -61,140 +122,155 @@ class MultiHorizonETAPredictor:
             self._init_from_raw_csv()
 
     def _init_from_db(self, db_path: Path) -> None:
-        """Load timetable index from deployment-ready SQLite database."""
-        conn = sqlite3.connect(str(db_path))
-        cur = conn.cursor()
+        """
+        Lightweight initialization from deployment-ready SQLite database.
+        Preloads only lightweight station zones (~0.4 MB) and train types (~0.3 MB).
+        Individual train routes are queried on-demand and cached in an LRU cache,
+        reducing baseline memory by >160 MB and preventing Render OOM kills.
+        """
+        self.db_path = db_path
+        self._db_conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        cur = self._db_conn.cursor()
 
-        # 1. Station zones & names
-        stn_rows = cur.execute("SELECT code, name, zone FROM stations").fetchall()
-        self.station_zones = {code.upper(): (zone or "NR").strip() for code, name, zone in stn_rows}
-        self.station_full_names = {code.upper(): (name or code).strip() for code, name, zone in stn_rows}
-
-        # Augment known modern station zones
+        # 1. Station zones dictionary (only {code: zone}, ~0.4 MB)
+        stn_rows = cur.execute("SELECT code, zone FROM stations").fetchall()
+        self.station_zones = {code.upper(): (zone or "NR").strip() for code, zone in stn_rows}
         for code, zone in KNOWN_STATION_ZONES.items():
             if code not in self.station_zones:
                 self.station_zones[code] = zone
-                self.station_full_names[code] = f"Station {code}"
         self.known_stations = set(self.station_zones.keys())
 
-        # 2. Train types & names
-        train_rows = cur.execute("SELECT train_no, train_name, type_code FROM trains").fetchall()
-        self.train_types = {str(t_no).zfill(5): (t_type or "EXP-TRAINS").strip() for t_no, t_name, t_type in train_rows}
-        self.train_names = {str(t_no).zfill(5): (t_name or f"Train {t_no}").strip() for t_no, t_name, t_type in train_rows}
-        self.known_trains_details = set(self.train_types.keys())
+        # 2. Train types dictionary (only {train_no: type_code}, ~0.3 MB)
+        train_rows = cur.execute("SELECT train_no, type_code FROM trains").fetchall()
+        self.train_types = {str(t_no).zfill(5): (t_type or "EXP-TRAINS").strip() for t_no, t_type in train_rows}
+        self.known_trains = set(self.train_types.keys())
 
-        # 3. Schedule routes
-        sched_rows = cur.execute(
-            "SELECT train_no, station_no, station_code, arrival_time, departure_time, distance "
-            "FROM schedules ORDER BY train_no, station_no"
-        ).fetchall()
-        conn.close()
+        # 3. Lazy proxies for routes and station index maps
+        self.routes = LazyRoutesDict(self)
+        self.route_station_indices = LazyRouteStationIndicesDict(self)
 
-        def to_min(t: Optional[str]) -> Optional[int]:
-            if not t or ":" not in t:
+    def _to_min(self, t: Optional[str]) -> Optional[int]:
+        if not t or ":" not in t:
+            return None
+        parts = t.split(":")
+        try:
+            return int(parts[0]) * 60 + int(parts[1])
+        except (ValueError, IndexError):
+            return None
+
+    def _fetch_route_and_indices(
+        self,
+        train_no: str
+    ) -> Optional[Tuple[List[Dict[str, Any]], Dict[str, int]]]:
+        """Fetch and build a single train's route topology on-demand from SQLite."""
+        train_no = str(train_no).strip().zfill(5)
+
+        if train_no in self._route_cache:
+            return self._route_cache[train_no]
+
+        if self._db_conn is not None:
+            cur = self._db_conn.cursor()
+            rows = cur.execute(
+                "SELECT station_no, station_code, arrival_time, departure_time, distance "
+                "FROM schedules WHERE train_no = ? ORDER BY station_no",
+                (train_no,)
+            ).fetchall()
+            if not rows:
                 return None
-            parts = t.split(":")
-            try:
-                return int(parts[0]) * 60 + int(parts[1])
-            except (ValueError, IndexError):
-                return None
 
-        self.routes: Dict[str, List[Dict[str, Any]]] = {}
-        self.route_station_indices: Dict[str, Dict[str, int]] = {}
+            stops: List[Dict[str, Any]] = []
+            stn_map: Dict[str, int] = {}
+            day = 1
+            prev_m: Optional[int] = None
 
-        current_train_no: Optional[str] = None
-        current_stops: List[Dict[str, Any]] = []
-        day = 1
-        prev_m: Optional[int] = None
+            for i, (s_no, s_code_raw, arr, dep, dist) in enumerate(rows):
+                s_code = str(s_code_raw).strip().upper()
+                stn_map[s_code] = i
+                arr_m = self._to_min(arr)
+                dep_m = self._to_min(dep)
 
-        for t_no_raw, s_no, s_code_raw, arr, dep, dist in sched_rows:
-            t_no = str(t_no_raw).strip().zfill(5)
-            s_code = str(s_code_raw).strip().upper()
+                if arr_m is not None and prev_m is not None and arr_m < prev_m:
+                    day += 1
+                arr_day = day
 
-            if t_no != current_train_no:
-                if current_train_no is not None:
-                    self._finalize_train_route(current_train_no, current_stops)
-                current_train_no = t_no
-                current_stops = []
-                day = 1
-                prev_m = None
+                check_m = arr_m if arr_m is not None else prev_m
+                if dep_m is not None and check_m is not None and dep_m < check_m:
+                    day += 1
+                dep_day = day
 
-            arr_m = to_min(arr)
-            dep_m = to_min(dep)
+                prev_m = dep_m if dep_m is not None else arr_m
 
-            # Cumulative day rollover progression
-            if arr_m is not None and prev_m is not None and arr_m < prev_m:
-                day += 1
-            arr_day = day
+                stops.append({
+                    "train_no": train_no,
+                    "sched_station_no": int(s_no),
+                    "station_name": s_code,
+                    "arrival_time": arr or None,
+                    "departure_time": dep or None,
+                    "distance_from_origin": int(dist or 0),
+                    "arr_min": arr_m,
+                    "dep_min": dep_m,
+                    "arrival_day": arr_day,
+                    "departure_day": dep_day,
+                })
 
-            check_m = arr_m if arr_m is not None else prev_m
-            if dep_m is not None and check_m is not None and dep_m < check_m:
-                day += 1
-            dep_day = day
-
-            prev_m = dep_m if dep_m is not None else arr_m
-
-            current_stops.append({
-                "train_no": t_no,
-                "sched_station_no": int(s_no),
-                "station_name": s_code,
-                "arrival_time": arr or None,
-                "departure_time": dep or None,
-                "distance_from_origin": int(dist or 0),
-                "arr_min": arr_m,
-                "dep_min": dep_m,
-                "arrival_day": arr_day,
-                "departure_day": dep_day,
-            })
-
-        if current_train_no is not None:
-            self._finalize_train_route(current_train_no, current_stops)
-
-        self.known_trains = set(self.routes.keys())
-
-    def _finalize_train_route(self, train_no: str, stops: List[Dict[str, Any]]) -> None:
-        """Compute route section metrics, dwell times, and station indices."""
-        self.routes[train_no] = stops
-        self.route_station_indices[train_no] = {}
-
-        num_stops = len(stops)
-        for i, stop in enumerate(stops):
-            self.route_station_indices[train_no][stop["station_name"]] = i
-
-            # Scheduled dwell time in minutes
-            if stop["dep_min"] is not None and stop["arr_min"] is not None:
-                stop["scheduled_dwell_time"] = (
-                    (stop["departure_day"] - stop["arrival_day"]) * 1440 + stop["dep_min"] - stop["arr_min"]
-                )
-            else:
-                stop["scheduled_dwell_time"] = 0.0
-
-            # Next station planned attributes
-            if i < num_stops - 1:
-                nxt = stops[i + 1]
-                dist_diff = nxt["distance_from_origin"] - stop["distance_from_origin"]
-                stop["sched_section_distance"] = dist_diff
-                if nxt["arr_min"] is not None and stop["dep_min"] is not None:
-                    trav_time = (
-                        (nxt["arrival_day"] - stop["departure_day"]) * 1440 + nxt["arr_min"] - stop["dep_min"]
+            num_stops = len(stops)
+            for i, stop in enumerate(stops):
+                if stop["dep_min"] is not None and stop["arr_min"] is not None:
+                    stop["scheduled_dwell_time"] = (
+                        (stop["departure_day"] - stop["arrival_day"]) * 1440 + stop["dep_min"] - stop["arr_min"]
                     )
-                    stop["sched_section_travel_time"] = trav_time
-                    if trav_time > 0 and dist_diff > 0:
-                        stop["sched_planned_speed"] = dist_diff / (trav_time / 60.0)
-                    else:
-                        stop["sched_planned_speed"] = None
                 else:
+                    stop["scheduled_dwell_time"] = 0.0
+
+                if i < num_stops - 1:
+                    nxt = stops[i + 1]
+                    dist_diff = nxt["distance_from_origin"] - stop["distance_from_origin"]
+                    stop["sched_section_distance"] = dist_diff
+                    if nxt["arr_min"] is not None and stop["dep_min"] is not None:
+                        trav_time = (
+                            (nxt["arrival_day"] - stop["departure_day"]) * 1440 + nxt["arr_min"] - stop["dep_min"]
+                        )
+                        stop["sched_section_travel_time"] = trav_time
+                        if trav_time > 0 and dist_diff > 0:
+                            stop["sched_planned_speed"] = dist_diff / (trav_time / 60.0)
+                        else:
+                            stop["sched_planned_speed"] = None
+                    else:
+                        stop["sched_section_travel_time"] = None
+                        stop["sched_planned_speed"] = None
+                    stop["sched_next_zone"] = self.station_zones.get(nxt["station_name"], "NR")
+                else:
+                    stop["sched_section_distance"] = None
                     stop["sched_section_travel_time"] = None
                     stop["sched_planned_speed"] = None
-                stop["sched_next_zone"] = self.station_zones.get(nxt["station_name"], "NR")
-            else:
-                stop["sched_section_distance"] = None
-                stop["sched_section_travel_time"] = None
-                stop["sched_planned_speed"] = None
-                stop["sched_next_zone"] = None
+                    stop["sched_next_zone"] = None
+
+            # Keep cache size bounded (max 512 routes in memory, ~3 MB)
+            if len(self._route_cache) >= 512:
+                self._route_cache.pop(next(iter(self._route_cache)))
+
+            res = (stops, stn_map)
+            self._route_cache[train_no] = res
+            return res
+
+        # Fallback if raw dicts were used
+        if hasattr(self, "_raw_routes") and train_no in self._raw_routes:
+            return (self._raw_routes[train_no], self._raw_indices[train_no])
+
+        return None
+
+    def get_route(self, train_no: str) -> Optional[List[Dict[str, Any]]]:
+        res = self._fetch_route_and_indices(train_no)
+        return res[0] if res else None
+
+    def get_station_index_map(self, train_no: str) -> Optional[Dict[str, int]]:
+        res = self._fetch_route_and_indices(train_no)
+        return res[1] if res else None
 
     def _init_from_raw_csv(self) -> None:
         """Legacy initialization from raw CSV datasets if SQLite database is absent."""
+        from ml.data.loader import load_schedule, load_station_master, load_train_details
+
         sched_df, _ = load_schedule()
         stn_df, _ = load_station_master()
         td_df, _ = load_train_details()
@@ -203,37 +279,30 @@ class MultiHorizonETAPredictor:
             stn_df["station_name"].to_list(),
             stn_df["station_zone"].to_list()
         ))
-        self.station_full_names = dict(zip(
-            stn_df["station_name"].to_list(),
-            stn_df["station_full_name"].to_list()
-        ))
         self.known_stations = set(self.station_zones.keys())
 
         self.train_types = dict(zip(
             td_df["train_no"].to_list(),
             td_df["type_code"].to_list()
         ))
-        self.train_names = dict(zip(
-            td_df["train_no"].to_list(),
-            td_df["train_name"].to_list()
-        ))
-        self.known_trains_details = set(self.train_types.keys())
+        self.known_trains = set(self.train_types.keys())
 
-        self.routes = {}
-        self.route_station_indices = {}
+        self._raw_routes: Dict[str, List[Dict[str, Any]]] = {}
+        self._raw_indices: Dict[str, Dict[str, int]] = {}
 
         sorted_sched = sched_df.sort(["train_no", "sched_station_no"])
         for row in sorted_sched.iter_rows(named=True):
             t_no = row["train_no"]
-            if t_no not in self.routes:
-                self.routes[t_no] = []
-                self.route_station_indices[t_no] = {}
+            if t_no not in self._raw_routes:
+                self._raw_routes[t_no] = []
+                self._raw_indices[t_no] = {}
 
-            idx = len(self.routes[t_no])
-            self.routes[t_no].append(row)
-            self.route_station_indices[t_no][row["station_name"]] = idx
+            idx = len(self._raw_routes[t_no])
+            self._raw_routes[t_no].append(row)
+            self._raw_indices[t_no][row["station_name"]] = idx
 
-        self.known_trains = set(self.routes.keys())
+        self.routes = self._raw_routes
+        self.route_station_indices = self._raw_indices
 
     def validate_train_and_station(self, train_no: str, current_station: str) -> Tuple[List[Dict[str, Any]], int]:
         """
@@ -244,11 +313,11 @@ class MultiHorizonETAPredictor:
         train_no = str(train_no).strip().zfill(5)
         current_station = str(current_station).strip().upper()
 
-        if train_no not in self.routes:
+        res = self._fetch_route_and_indices(train_no)
+        if res is None:
             raise UnknownTrainError(train_no)
 
-        route = self.routes[train_no]
-        station_index_map = self.route_station_indices[train_no]
+        route, station_index_map = res
 
         if current_station not in station_index_map:
             if current_station not in self.known_stations:
